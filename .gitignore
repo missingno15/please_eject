@@ -1,0 +1,2 @@
+# Build artifact (may embed local machine paths from the Go toolchain).
+please_eject
