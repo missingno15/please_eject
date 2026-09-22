@@ -68,6 +68,11 @@ type model struct {
 
 	spotlight string // volume's Spotlight indexing state: on/off/not indexed
 
+	// dissenters are PIDs Disk Arbitration named while refusing an eject.
+	// They are fed back into the next scan so a root terminal login that lsof
+	// cannot see still shows up in the list.
+	dissenters []int
+
 	width, height int
 }
 
@@ -86,14 +91,16 @@ func New(vol volume.Info) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+	return tea.Batch(m.spinner.Tick, m.rescan())
 }
 
 // ---- Commands ----
 
-func scanVolCmd(vol volume.Info) tea.Cmd {
+func (m model) rescan() tea.Cmd {
+	vol := m.vol
+	pids := append([]int(nil), m.dissenters...)
 	return func() tea.Msg {
-		procs, err := scan.Scan(vol.MountPoint)
+		procs, err := scan.Scan(vol.MountPoint, pids...)
 		return scanDoneMsg{procs: procs, spotlight: vol.SpotlightStatus(), err: err}
 	}
 }
@@ -143,7 +150,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// After killing, always rescan to confirm the real state.
 		m.state = stateScanning
 		m.status = "Rechecking the volume…"
-		return m, tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+		return m, tea.Batch(m.spinner.Tick, m.rescan())
 
 	case ejectDoneMsg:
 		return m.onEjectDone(msg)
@@ -156,7 +163,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Give mds a moment to let go, then rescan.
 		m.state = stateScanning
-		return m, tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+		return m, tea.Batch(m.spinner.Tick, m.rescan())
 
 	case tea.KeyMsg:
 		return m.onKey(msg)
@@ -174,25 +181,65 @@ func (m model) onScanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
 	m.spotlight = msg.spotlight
 	// Drop marks/cursor for processes that no longer exist.
 	m.reconcile()
+	m.dissenters = livePIDs(m.dissenters, m.procs)
 	if len(m.procs) == 0 {
 		m.state = stateClear
 		m.status = ""
 		return m, nil
 	}
 	m.state = stateList
+	if hasAnchor(m.procs) {
+		m.status = "A terminal session is still holding this volume. Stopping it closes that tab."
+	}
 	return m, nil
 }
 
 func (m model) onEjectDone(msg ejectDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.ejErr = msg.err.Error()
-		// Re-scan to show what grabbed it again.
-		m.state = stateScanning
 		m.status = "Eject failed — rescanning to see what's holding it…"
-		return m, tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+		if pid, ok := volume.DissenterPID(m.ejErr); ok {
+			m.dissenters = addPID(m.dissenters, pid)
+			m.ejErr = ""
+			m.status = "Eject was refused by a process lsof didn't list. Checking it…"
+		}
+		m.state = stateScanning
+		return m, tea.Batch(m.spinner.Tick, m.rescan())
 	}
 	m.state = stateEjected
 	return m, tea.Quit
+}
+
+func hasAnchor(procs []scan.Process) bool {
+	for _, p := range procs {
+		if p.Anchor {
+			return true
+		}
+	}
+	return false
+}
+
+func addPID(ids []int, pid int) []int {
+	for _, id := range ids {
+		if id == pid {
+			return ids
+		}
+	}
+	return append(ids, pid)
+}
+
+func livePIDs(ids []int, procs []scan.Process) []int {
+	live := map[int]bool{}
+	for _, p := range procs {
+		live[p.PID] = true
+	}
+	var kept []int
+	for _, id := range ids {
+		if live[id] {
+			kept = append(kept, id)
+		}
+	}
+	return kept
 }
 
 func (m *model) reconcile() {
@@ -225,7 +272,7 @@ func (m model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.state = stateScanning
 			m.status = "Rescanning…"
-			return m, tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+			return m, tea.Batch(m.spinner.Tick, m.rescan())
 		case "s":
 			return m.nudgeSpotlight()
 		case "q", "ctrl+c", "esc":
@@ -284,7 +331,7 @@ func (m model) onListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.state = stateScanning
 		m.status = "Rescanning…"
-		return m, tea.Batch(m.spinner.Tick, scanVolCmd(m.vol))
+		return m, tea.Batch(m.spinner.Tick, m.rescan())
 	case "s":
 		// Nudge Spotlight to stop indexing (needs sudo; releases mds/mdworker).
 		return m.nudgeSpotlight()

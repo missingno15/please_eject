@@ -32,8 +32,15 @@ type Process struct {
 	// System is true when this looks like an OS-owned/critical process that the
 	// user should think twice before force-killing.
 	System bool
-	// Reason explains why System is set (empty when not a system process).
+	// Reason explains why System is set, or, for an Anchor, why this session
+	// is holding the volume.
 	Reason string
+	// Anchor is a process lsof cannot see that still vetoes ejection. The usual
+	// case is a terminal's /usr/bin/login: it keeps the tab's original working
+	// directory for the life of the session, and because it runs as root lsof
+	// omits it. The shell can cd away and disappear from the list while login
+	// still dissents the unmount. Stopping an anchor closes that tab.
+	Anchor bool
 }
 
 // Label returns the friendliest name available for the process.
@@ -72,22 +79,25 @@ var systemCommands = map[string]string{
 
 // Scan runs lsof against the given mount point and returns the processes
 // holding it, sorted with user processes first, then by PID.
-func Scan(mountPoint string) ([]Process, error) {
+//
+// dissenterPIDs are processes Disk Arbitration already named as refusing an
+// unmount (see volume.DissenterPID). They are included even when lsof cannot
+// see them, which is how a root terminal login shows up after a failed eject.
+func Scan(mountPoint string, dissenterPIDs ...int) ([]Process, error) {
 	// Passing a mount point to lsof lists every open file on that filesystem,
 	// regardless of directory depth. -F gives machine-readable output.
 	cmd := exec.Command("lsof", "-w", "-F", "pcuLtn", "--", mountPoint)
 	out, err := cmd.Output()
-	if err != nil {
-		// lsof exits non-zero (1) when it simply finds nothing. Treat empty
-		// output as "no processes" rather than an error.
-		if len(bytes.TrimSpace(out)) == 0 {
-			return nil, nil
-		}
-		// Otherwise still try to parse what we got.
+	if err != nil && len(bytes.TrimSpace(out)) == 0 {
+		// lsof exits non-zero (1) when it simply finds nothing. Empty output
+		// means no open files, not a failed scan — but a terminal login can
+		// still be holding the volume without showing up here, so keep going.
+		out = nil
 	}
 
 	procs := parse(out)
 	enrich(procs)
+	procs = mergeAnchors(procs, mountPoint, dissenterPIDs)
 
 	sort.Slice(procs, func(a, b int) bool {
 		if procs[a].System != procs[b].System {

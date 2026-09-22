@@ -147,6 +147,8 @@ func (m model) viewRow(i int, p scan.Process) string {
 
 	if p.System {
 		line += "  " + sysStyle.Render("⚠ "+p.Reason)
+	} else if p.Anchor && p.Reason != "" {
+		line += "\n      " + warnStyle.Render(p.Reason)
 	}
 
 	// Show a sample open path under the highlighted row for context.

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"please_eject/internal/scan"
@@ -136,6 +138,54 @@ func TestManualKillCurrentWhenNoneMarked(t *testing.T) {
 	m = next.(model)
 	if m.state != stateKilling {
 		t.Fatalf("expected killing state, got %v", m.state)
+	}
+}
+
+func TestEjectDissenterIsRememberedForRescan(t *testing.T) {
+	m := newTestModel()
+	next, _ := m.Update(scanDoneMsg{})
+	m = next.(model)
+	if m.state != stateClear {
+		t.Fatalf("expected clear state, got %v", m.state)
+	}
+	msg := "Unmount was dissented by PID 99216 (/usr/bin/login)\nDissenter parent PPID 1550\n"
+	next, cmd := m.Update(ejectDoneMsg{err: errors.New(msg)})
+	m = next.(model)
+	if m.state != stateScanning {
+		t.Fatalf("expected rescan after dissented eject, got %v", m.state)
+	}
+	if cmd == nil {
+		t.Fatal("expected a rescan command")
+	}
+	if len(m.dissenters) != 1 || m.dissenters[0] != 99216 {
+		t.Fatalf("dissenters = %v", m.dissenters)
+	}
+	if m.ejErr != "" {
+		t.Fatalf("raw diskutil error should be replaced by the session row, got %q", m.ejErr)
+	}
+}
+
+func TestAnchorIsIncludedInStopAll(t *testing.T) {
+	m := newTestModel()
+	procs := append(sampleProcs(), scan.Process{
+		PID: 99216, Command: "iTerm session", Anchor: true,
+		Reason: "session still anchored on this volume",
+	})
+	next, _ := m.Update(scanDoneMsg{procs: procs})
+	m = next.(model)
+	if !strings.Contains(m.status, "terminal session") {
+		t.Fatalf("status = %q", m.status)
+	}
+	next, _ = m.Update(key("a"))
+	m = next.(model)
+	found := false
+	for _, p := range m.pending {
+		if p.PID == 99216 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("anchor session should be included in stop-all")
 	}
 }
 

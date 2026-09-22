@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -104,6 +106,24 @@ func (i Info) SpotlightStatus() string {
 	default:
 		return ""
 	}
+}
+
+// dissenterPIDPattern matches diskutil's report of the process that vetoed an
+// unmount, e.g. "Unmount was dissented by PID 99216 (/usr/bin/login)".
+var dissenterPIDPattern = regexp.MustCompile(`dissented by PID (\d+)`)
+
+// DissenterPID returns the process Disk Arbitration named as refusing the
+// unmount, when msg is a diskutil eject/unmount failure that includes one.
+func DissenterPID(msg string) (int, bool) {
+	m := dissenterPIDPattern.FindStringSubmatch(msg)
+	if m == nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(m[1])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 // Eject asks diskutil to eject the volume. It returns diskutil's message so the
